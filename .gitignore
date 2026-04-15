@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller
+dist/
+build/
+*.spec
+
+# Virtual Environment
+venv/
+env/
+
+# Logs
+logs/
+*.log
+
+# Config (user data)
+config/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Mac
+.DS_Store
+
+# Backup files
+*.bak
+*.backup
+
+# Executables
+*.exe
+*.dll
+*.so
