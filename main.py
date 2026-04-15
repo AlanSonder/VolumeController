@@ -6,8 +6,9 @@ import time
 from config_manager import ConfigManager
 from gui import SettingsWindow, TrayIcon
 from logger import setup_logger
-from process_monitor import ProcessMonitor
-from volume_controller import VolumeController
+from window_listener import WindowListener
+from audio_listener import AudioListener
+from state_manager import StateManager
 
 logger = setup_logger("VolumeController")
 
@@ -15,13 +16,13 @@ logger = setup_logger("VolumeController")
 class VolumeControllerApp:
     def __init__(self):
         self._config = ConfigManager()
-        self._volume_ctrl = VolumeController()
-        self._process_monitor = ProcessMonitor()
+        self._state_manager = StateManager(self._config)
+        self._window_listener = WindowListener()
+        self._audio_listener = AudioListener()
         self._tray_icon: TrayIcon | None = None
         self._settings_window: SettingsWindow | None = None
         self._running = False
-        self._monitor_thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._sync_thread: threading.Thread | None = None
 
     def start(self) -> None:
         logger.info("=" * 60)
@@ -32,11 +33,20 @@ class VolumeControllerApp:
 
         self._running = True
 
-        self._monitor_thread = threading.Thread(
-            target=self._monitor_loop, daemon=True, name="MonitorThread"
+        # 启动前台窗口监听器
+        if not self._window_listener.start(self._on_foreground_change):
+            logger.error("启动前台窗口监听器失败")
+
+        # 启动音频会话监听器
+        if not self._audio_listener.start(self._on_audio_session_change):
+            logger.error("启动音频会话监听器失败")
+
+        # 启动兜底同步线程
+        self._sync_thread = threading.Thread(
+            target=self._sync_loop, daemon=True, name="SyncThread"
         )
-        self._monitor_thread.start()
-        logger.info("监控线程已启动")
+        self._sync_thread.start()
+        logger.info("兜底同步线程已启动")
 
         self._tray_icon = TrayIcon(
             config_manager=self._config,
@@ -52,72 +62,43 @@ class VolumeControllerApp:
         logger.info("系统托盘已启动")
 
         try:
+            import ctypes
+            user32 = ctypes.windll.user32
             while self._running:
-                time.sleep(0.5)
+                # 处理Windows消息
+                msg = ctypes.wintypes.MSG()
+                while user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 1):
+                    user32.TranslateMessage(ctypes.byref(msg))
+                    user32.DispatchMessageW(ctypes.byref(msg))
+                # 短暂睡眠
+                import time
+                time.sleep(0.01)
         except KeyboardInterrupt:
             logger.info("收到键盘中断信号")
             self._exit()
 
-    def _monitor_loop(self) -> None:
+    def _on_foreground_change(self, pid: int, name: str) -> None:
+        """处理前台窗口切换事件"""
+        self._state_manager.update_foreground(pid, name)
+
+    def _on_audio_session_change(self, process_name: str, pid: int, is_created: bool) -> None:
+        """处理音频会话变化事件"""
+        if is_created:
+            self._state_manager.add_session(process_name, pid, is_created)
+
+    def _sync_loop(self) -> None:
+        """兜底同步循环"""
         while self._running:
             try:
-                if not self._config.enabled:
-                    self._restore_all_muted()
-                    time.sleep(self._config.check_interval_ms / 1000.0)
-                    continue
-
-                self._check_and_control()
-                time.sleep(self._config.check_interval_ms / 1000.0)
-
+                if self._config.enabled:
+                    self._state_manager.sync()
+                time.sleep(1)  # 每秒检查一次是否需要同步
             except Exception as e:
-                logger.error("监控循环异常: %s", e, exc_info=True)
+                logger.error("同步循环异常: %s", e, exc_info=True)
                 time.sleep(2)
 
-    def _check_and_control(self) -> None:
-        fg_info = self._process_monitor.get_foreground_process()
-        if fg_info is None:
-            return
-
-        fg_pid, fg_name = fg_info
-        sessions = self._volume_ctrl.get_all_sessions()
-
-        active_pids = set[int]()
-
-        for session in sessions:
-            active_pids.add(session.pid)
-
-            is_foreground = session.pid == fg_pid
-            is_whitelisted = self._config.is_whitelisted(session.process_name)
-
-            if is_foreground or is_whitelisted:
-                if self._volume_ctrl.was_muted_by_us(session.pid):
-                    self._volume_ctrl.unmute_process(session)
-                    logger.info(
-                        "恢复前台应用音量: %s (PID: %d)",
-                        session.process_name,
-                        session.pid,
-                    )
-            else:
-                if not session.is_muted:
-                    self._volume_ctrl.mute_process(session)
-                    logger.info(
-                        "静音后台应用: %s (PID: %d)",
-                        session.process_name,
-                        session.pid,
-                    )
-
-        self._volume_ctrl.cleanup_stale_entries(active_pids)
-
     def _restore_all_muted(self) -> None:
-        muted_pids = self._volume_ctrl.get_muted_pids()
-        if not muted_pids:
-            return
-
-        sessions = self._volume_ctrl.get_all_sessions()
-        for session in sessions:
-            if self._volume_ctrl.was_muted_by_us(session.pid):
-                self._volume_ctrl.unmute_process(session)
-                logger.info("恢复音量: %s (PID: %d)", session.process_name, session.pid)
+        self._state_manager.restore_all()
 
     def _open_settings(self) -> None:
         def _show():
@@ -148,6 +129,11 @@ class VolumeControllerApp:
         logger.info("正在退出 VolumeController...")
         self._running = False
 
+        # 停止监听器
+        self._window_listener.stop()
+        self._audio_listener.stop()
+
+        # 恢复所有静音
         self._restore_all_muted()
 
         if self._tray_icon:
