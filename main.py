@@ -33,6 +33,9 @@ class VolumeControllerApp:
 
         self._running = True
 
+        # 显示启动成功弹窗
+        self._show_startup_notification()
+
         # 启动前台窗口监听器
         if not self._window_listener.start(self._on_foreground_change):
             logger.error("启动前台窗口监听器失败")
@@ -125,6 +128,21 @@ class VolumeControllerApp:
             self._tray_icon.update_icon(self._config.enabled)
         self._config.reload()
 
+    def _show_startup_notification(self) -> None:
+        """显示启动成功弹窗"""
+        try:
+            import ctypes
+            # 显示消息框
+            ctypes.windll.user32.MessageBoxW(
+                0,  # hWnd
+                "启动成功！",  # 消息内容
+                "VolumeController",  # 标题
+                0x40 | 0x1  # MB_ICONINFORMATION | MB_OK
+            )
+            logger.info("启动成功弹窗已显示")
+        except Exception as e:
+            logger.error("显示启动弹窗失败: %s", e)
+
     def _exit(self) -> None:
         logger.info("正在退出 VolumeController...")
         self._running = False
@@ -138,6 +156,9 @@ class VolumeControllerApp:
 
         if self._tray_icon:
             self._tray_icon.stop()
+
+        # 释放互斥体
+        release_mutex()
 
         logger.info("VolumeController 已退出")
         sys.exit(0)
@@ -164,7 +185,71 @@ def check_windows_version() -> bool:
         return True
 
 
+# 全局变量，用于存储互斥体句柄
+_g_mutex = None
+
+def check_running_instance() -> bool:
+    """检查是否已有VolumeController实例在运行（使用互斥体方法）"""
+    global _g_mutex
+    try:
+        import ctypes
+        
+        # 创建互斥体
+        mutex_name = "Global\\VolumeControllerMutex"
+        mutex = ctypes.windll.kernel32.CreateMutexW(
+            None,  # lpMutexAttributes
+            True,  # bInitialOwner
+            mutex_name  # lpName
+        )
+        
+        # 检查是否创建成功
+        if mutex == 0:
+            logger.error("创建互斥体失败")
+            return False
+        
+        # 检查是否已有实例在运行
+        error_code = ctypes.windll.kernel32.GetLastError()
+        if error_code == 183:  # ERROR_ALREADY_EXISTS
+            logger.info("检测到已有VolumeController实例在运行（通过互斥体）")
+            ctypes.windll.kernel32.CloseHandle(mutex)
+            return True
+        
+        logger.info("未检测到VolumeController进程（通过互斥体）")
+        # 保存互斥体句柄，直到程序退出
+        _g_mutex = mutex
+        return False
+    except Exception as e:
+        logger.error(f"互斥体检测失败: {e}")
+        return False
+
+def release_mutex():
+    """释放互斥体"""
+    global _g_mutex
+    if _g_mutex:
+        try:
+            import ctypes
+            ctypes.windll.kernel32.CloseHandle(_g_mutex)
+            logger.info("互斥体已释放")
+        except Exception as e:
+            logger.error(f"释放互斥体失败: {e}")
+        finally:
+            _g_mutex = None
+
 def main() -> None:
+    # 检查是否已有实例在运行
+    if check_running_instance():
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "应用已在运行, 请勿重复启动。",
+                "VolumeController",
+                0x40 | 0x1  # MB_ICONINFORMATION | MB_OK
+            )
+        except Exception:
+            pass
+        sys.exit(0)
+
     if not check_windows_version():
         print("错误: 此程序需要 Windows 10 或更高版本")
         sys.exit(1)

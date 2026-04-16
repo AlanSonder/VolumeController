@@ -42,3 +42,4 @@ Desktop.ini
 *.exe
 *.dll
 *.so
+build.bat
